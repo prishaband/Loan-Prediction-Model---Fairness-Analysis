@@ -1,0 +1,1065 @@
+---
+title: "Project 4: Loan Prediction Model"
+output: html_document
+date: "2024-12-05"
+---
+
+In Project 1, I focused on cleaning the data, especially the "NA" values that were all over the data. At first, I was not sure how to handle those missing values. But in Project 2, looking at my peer's work taught me a lesson: first of all, one needs to select the most relevant features to predict loan approval, and most of these should relate to financials. The other variables proved to be less important in this analysis. This realization has made my cleaning of data much easier since I could just use the `na.omit` function, which actually led to an empty dataset if I hadn't first narrowed down the features. 
+
+With this understanding, I will use this strategy in my final Project 4 to enhance efficiency and focus.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Loading necessary Libraries
+```{r}
+# Load necessary library
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+library(caret)
+library(pROC)
+library(tidyr)
+library(rsample)
+library(yardstick)
+```
+# Data Reading
+```{r}
+data <- read.csv("C:\\Users\\prish\\Downloads\\state_GA_actions_taken_1-3.csv", sep = ",", header = T)
+```
+
+# Feature Selection 
+**Data Handling**
+Lenders must treat all applicants fairly and consistently throughout the lending process, regardless of their personal characteristics. This means evaluating applicants based on their creditworthiness and financial qualifications rather than discriminatory factors[1].
+Hence I chose all financial attributes (included sensitive attributes as it's needed for analysis later, removed whenever needed).
+
+```{r}
+selected_cols <- c('conforming_loan_limit', 'loan_amount','action_taken', 'income','loan_type','loan_purpose','hoepa_status','applicant_credit_score_type','debt_to_income_ratio','derived_sex','derived_ethnicity','derived_race')
+
+selected_data <- data[, selected_cols]
+
+selected_data <- na.omit(selected_data)
+
+# Removing rows where target variable 'action_taken' is missing
+selected_data <- selected_data[!is.na(selected_data$action_taken), ]
+
+category_levels <- levels(factor(selected_data$conforming_loan_limit))
+selected_data$conforming_loan_limit <- ifelse(selected_data$conforming_loan_limit == "C", 0,1)
+```
+
+```{r}
+# Converting all columns to numeric
+selected_data_numeric <- selected_data %>%
+  mutate(across(everything(), ~ {
+    if (is.character(.)) {
+      # Converting character to factor, then to numeric
+      as.numeric(as.factor(.))
+    } else {
+      # If already numeric, just return the column
+      as.numeric(.)
+    }
+  }))
+
+# Checking the structure of the new data frame
+str(selected_data_numeric)
+```
+# Correlation Anlaysis
+```{r}
+# Calculating the correlation matrix
+correlation_matrix <- cor(selected_data_numeric, use = "complete.obs")# Use complete cases only
+
+# Visualizing the correlation matrix using a heatmap
+# Melt the correlation matrix for ggplot
+correlation_melted <- melt(correlation_matrix)
+
+# Createing a heatmap
+ggplot(data = correlation_melted, aes(Var1, Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       limit = c(-1, 1), name="Correlation") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Correlation Matrix Heatmap", x = "Variables", y = "Variables")
+```
+
+The correlation matrix is very informative when it comes to relationships among these features within the dataset:
+
+1. **Debt-to-Income Ratio**: This feature has shown a medium positive correlation with `loan_amount` (0.51) and a negative correlation with `action_taken` (-0.13). It would, therefore mean that high debt-to-income ratios come with larger loan amounts, but they also bear a correlation with a greater chance of loan denial.
+
+2. **Income**: It indicates a positive correlation with `conforming_loan_limit` 0.26 and `loan_amount` 0.31, while a rather weak negative one regarding `action_taken` -0.06. This is likely to prove that income, too, comes into play in loan decisions but not too strongly.
+
+3. **Loan Type and Loan Purpose**: These features are weakly correlated with other variables, which means that these features may not be significant in determining the target variable, `action_taken`. For instance, `loan_type` is negatively correlated with `income` at -0.08 and `loan_purpose` at -0.03, meaning they bear limited predictive power on loan approval or rejection.
+
+4. **HOEPA Status**: For this attribute, there's a very strong positive (0.89) dependency with the variable `action_taken`. Quite logical - HOEPA status probably reflects the appropriateness and approval outcomes for credit.
+
+5. **Derived Demographics (Sex, Ethnicity, Race)**: All the correlations among these demographic features versus `action_taken` are negligible, with the maximum between `derived_sex` and `derived_race` of 0.12, hence, when other factors, such as debt-to-income ratio and loan amount among others, are controlled these demographics have little significance.
+
+6. **Credit Score**: The feature `applicant_credit_score_type` has only weak correlations with most of the other features; this would support the hypothesis that it doesn't play a major role in loan decisions beyond the rest of the financial variables.
+
+The feature selection analysis thus suggests that financial features like `debt_to_income_ratio`, `loan_amount`, and `income` are more important in determining loan outcomes.
+
+
+```{r}
+# Converting action_taken to binary (1 for approved, 0 for denied)
+selected_data$action_taken_binary <- ifelse(selected_data$action_taken == 1, 1, 0)
+
+# Removing the original action_taken column and any other unnecessary columns (removing the sensitive attributes for this analysis)
+model_data <- selected_data %>%
+  select(-action_taken)
+
+# Checking the structure of the new data
+str(model_data)
+```
+# Data Modeling
+I changed my data split from 80-20 to 70-30 for training and testing to get a better evaluation of the model's performance. In so doing, 30% of the data would be for the test set, hence providing a bigger and more representative sample for testing. This approach aids in evaluating the model's ability to generalize and minimizes the risk of overfitting. This adjustment gives a better estimate of the model's performance on new, unseen data, especially when dealing with imbalanced or small datasets.
+
+```{r}
+# Set seed for reproducibility
+set.seed(123)
+
+# Creating a train-test split (70% train, 30% test)
+train_index <- createDataPartition(model_data$action_taken_binary, p = 0.7, list = FALSE)
+train_data <- model_data[train_index, ]
+test_data <- model_data[-train_index, ]
+```
+
+```{r}
+# Fitting the logistic regression model
+log_model <- glm(action_taken_binary ~ ., data = train_data, family = binomial)
+
+# Summary of the model
+summary(log_model)
+```
+
+# Logistic Regression Model Summary
+
+The model postulates the relationship between loan amount, income, debt-to-income ratio, and credit score type with regard to the likelihood of loan approval.
+
+**Strong Predictors for Loan Approval**
+
+Key variables include:
+
+- Loan amount: Large loans are positively related to approval rates, probably because large loans are considered to reflect the financial stability of an applicant or the confidence lenders have in the loan.
+
+- Income: Higher income significantly increases the chances of approval, as it means higher repayment capacity.
+
+- Applicant credit score type: A lower credit score significantly reduces the chances of approval, which is expected from the cautious approach of lenders.
+
+- Debt-to-Income Ratio: Ratios above 60% can severely reduce the odds of approval, reflecting lenders' concerns about the applicant's ability to manage repayment.
+
+Loan type: Some types of loans are less likely to be approved, which may indicate that lenders have certain preferences or restrictions in place.
+
+These factors agree with the practical criteria that lenders use in making decisions.
+
+# Model Performance Evaluation
+```{r}
+# Making predictions on the test set
+predicted_probabilities <- predict(log_model, newdata = test_data, type = "response")
+
+# Converting probabilities to binary predictions (threshold = 0.5)
+predicted_classes <- ifelse(predicted_probabilities > 0.5, 1, 0)
+
+# Creating a confusion matrix
+confusion_matrix <- table(test_data$action_taken_binary, predicted_classes)
+print(confusion_matrix)
+```
+**Confusion Matrix**
+
+True Negatives (TN): 22,568 (correctly predicted as denied)
+
+False Positives (FP): 631 (incorrectly predicted as approved)
+
+False Negatives (FN): 2,576 (incorrectly predicted as denied)
+
+True Positives (TP): 56,649 (correctly predicted as approved)
+```{r}
+TP <- confusion_matrix[2, 2]  # True Positives
+FN <- confusion_matrix[2, 1]  # False Negatives
+TN <- confusion_matrix[1, 1]  # True Negatives
+FP <- confusion_matrix[1, 2]  # False Positives
+
+# Compute TPR and TNR
+TPR <- TP / (TP + FN)  # Sensitivity/Recall
+TNR <- TN / (TN + FP)  # Specificity
+FPR <- FP / (FP + TN)  # False Positive Rate
+FNR <- FN / (FN + TP)  # False Negative Rate
+```
+```{r}
+TPR
+```
+```{r}
+TNR
+```
+```{r}
+FPR
+```
+```{r}
+FNR
+```
+```{r}
+# Calculating accuracy
+accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+print(paste("Accuracy:", round(accuracy, 4)))
+```
+
+The model achieved an accuracy of 96.11%. This means that the model classified approximately 96% of the loan applications correctly in the test set, which is a very high accuracy and thus generalizes well overall.
+
+# ROC Curve Analysis
+```{r}
+# Calculating ROC curve and AUC
+roc_curve <- roc(test_data$action_taken_binary, predicted_probabilities)
+auc_value <- auc(roc_curve)
+
+# Plotting ROC curve
+plot(roc_curve, main = "ROC Curve for Original Model")
+```
+```{r}
+print(paste("AUC:", round(auc_value, 4)))
+```
+
+The ROC curve shows graphically the performance of the model for different thresholds. The AUC is 0.9928, which is very close to 1. This means that the model has an excellent discriminative ability, which means that it can effectively distinguish between approved and denied loan applications.
+
+# Visulisation Analysis
+**RACE Proprtions in Original Model**
+```{r}
+dataa <- selected_data
+dataa$action_taken_binary <- as.factor(ifelse(dataa$action_taken_binary == 1, "approved", 
+                                      ifelse(dataa$action_taken_binary == 0, "denial", NA)))
+
+# Plotting the bar chart
+race_original_model <- ggplot(dataa, aes(x = derived_race, fill = action_taken_binary)) + 
+  geom_bar(position = "fill") + 
+  labs(
+    title = "Proportion of Actions Taken by Race (Original Model)",
+    x = "Derived Race",
+    y = "Proportion",
+    fill = "Action Taken"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+race_original_model
+```
+The proportion of approved actions was noticeably higher for certain racial groups, like White and Asian, compared to other groups like Black or African American.
+
+**ETHNICITY Proprtions in Original Model**
+```{r}
+# Plotting the bar chart
+ethnicity_original_model <- ggplot(dataa, aes(x = derived_ethnicity, fill = action_taken_binary)) + 
+  geom_bar(position = "fill") + 
+  labs(
+    title = "Proportion of Actions Taken by ethnicity (Original Model)",
+    x = "Derived ethnicity",
+    y = "Proportion",
+    fill = "Action Taken"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ethnicity_original_model
+```
+
+The proportion of approved actions was noticeably higher for majority of the ethnicity groups.
+
+**SEX Proprtions in Original Model**
+```{r}
+# Plotting the bar chart
+sex_original_model <- ggplot(dataa, aes(x = derived_sex, fill = action_taken_binary)) + 
+  geom_bar(position = "fill") + 
+  labs(
+    title = "Proportion of Actions Taken by sex (Original Model)",
+    x = "Derived sex",
+    y = "Proportion",
+    fill = "Action Taken"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+sex_original_model
+```
+
+The pattern is consistent, with a higher proportion of approved actions for the 'Male' category when compared to 'Female' and 'Sex Not Available'.
+The 'Sex Not Available' category has the lowest proportion of approved actions and the highest proportion of denied actions.
+
+# Analysis for Fairness
+
+```{r}
+table(data$denial_reason.1)#(1 = debt_to_income_ratio)
+```
+```{r}
+table(data$denial_reason.2)
+table(data$denial_reason.4)
+
+data <- selected_data
+data <- data[data$derived_race != "Free Form Text Only", ] #cleaing the data from undesired variables
+data <- data[data$derived_ethnicity != "Free Form Text Only",]
+```
+
+Analyzing the data, I realized that most loan denials were associated with "debt-to-income ratio," but class discussions have recently informed me that sometimes models do show bias in the differentiation between demographic groups or genders.
+
+In light of this, my strategy to overcome this is balancing the dataset by randomly selecting individuals in each demographic group so that each demographic group is fairly represented. Using a model created from this balanced dataset, I will compare the results to the results using the original model.
+
+If the two models vary significantly, it would be an indication that the original model may be biased. This approach will enable me to verify whether the predictions are impacted by the imbalances in the data or if they actually reflect the influence of the debt-to-income ratio.
+
+```{r}
+table(data$derived_race) 
+```
+
+I observed that around 420 is the least of an individual in a race.
+
+# RACE BIASING ANALYSIS
+```{r}
+# To achieve a balanced dataset where each race has 420 individual
+# Filtering data for each race and sample 420 individuals
+data_race_balanced <- bind_rows(
+  data %>% filter(derived_race == "2 or more minority races") %>% sample_n(420),
+  data %>% filter(derived_race == "American Indian or Alaska Native") %>% sample_n(420),
+  data %>% filter(derived_race == "Asian") %>% sample_n(420),
+  data %>% filter(derived_race == "Black or African American") %>% sample_n(420),
+  data %>% filter(derived_race == "Joint") %>% sample_n(420),
+  data %>% filter(derived_race == "Native Hawaiian or Other Pacific Islander") %>% sample_n(420),
+  data %>% filter(derived_race == "Race Not Available") %>% sample_n(420),
+  data %>% filter(derived_race == "White") %>% sample_n(420)
+)
+
+#Calculating the approval rates by race
+race_approval_rates_balanced <- prop.table(table(data_race_balanced$derived_race, data_race_balanced$action_taken), 1)
+race_approval_rates_balanced
+```
+```{r}
+race_approval_rates <- prop.table(table(data$derived_race, data$action_taken), 1)
+race_approval_rates
+```
+```{r}
+# Extracting approval rates (action_taken = 1) from both datasets
+approval_rates_original_race <- prop.table(table(data$derived_race, data$action_taken), 1)[, "1"]
+approval_rates_race_balanced <- prop.table(table(data_race_balanced$derived_race, data_race_balanced$action_taken), 1)[, "1"]
+
+# Calculating differences
+approval_rate_differences_race <- approval_rates_race_balanced - approval_rates_original_race
+
+# Combining into a table
+comparison_table_race <- data.frame(
+  Race = names(approval_rates_original_race),
+  Original_Data = round(approval_rates_original_race * 100, 2),
+  Balanced_Data = round(approval_rates_race_balanced * 100, 2),
+  Difference = round(approval_rate_differences_race * 100, 2)
+)
+rownames(comparison_table_race) <- comparison_table_race$Race
+comparison_table_race$Race <- NULL
+
+# Printing the table
+print(comparison_table_race)
+```
+
+**Conclusion**
+
+Most differences are within ±2.5%, which would indicate that the balancing of the dataset resulted in very minor changes in the original approval rates for most groups. 
+
+- The largest change is for the American Indian or Alaska Native group, which decreased by 4.37%, indicating a significant drop in approval rates in the balanced dataset.
+
+Other groups saw significant decreases: 2 or more minority races decreased by 2.39%, but still within the margin of acceptable variation. 
+
+On the other hand, slight increases in Black or African American of +1.87%, Joint of +1.38%, and Race Not Available with +1.31%, show a fair redistribution without major changes in approval rates.
+
+- In contrast, groups like Asian (-0.09%), Native Hawaiian or Other Pacific Islander (+0.14%), and White (+0.24%) have very small changes, reflecting stability in their approval rates.
+
+The differences are not large overall, which could indicate that balancing might amplify some disparities for specific groups. On the other hand, small changes across most races hint at the fact that the original data wasn't so biased.
+
+The balancing was done to further validate this finding, and I will use this balanced dataset to create a predictive model and compare its performance with the original model to see if this balancing has any effect.
+```{r}
+# Converting action_taken to binary (1 for approved, 0 for denied)
+data_race_balanced$action_taken_binary <- ifelse(data_race_balanced$action_taken == 1, 1, 0)
+
+race_model_data <- data_race_balanced %>%
+  select(-action_taken,-derived_sex,-derived_ethnicity)
+```
+
+```{r}
+set.seed(123)
+
+# Creating a train-test split (70% train, 30% test)
+train_index_balanced_race <- createDataPartition(race_model_data$action_taken_binary, p = 0.7, list = FALSE)
+train_data_balanced_race <- race_model_data[train_index_balanced_race, ]
+test_data_balanced_race <- race_model_data[-train_index_balanced_race, ]
+```
+
+```{r}
+# Fit the logistic regression model
+log_model_race <- glm(action_taken_binary ~ ., data = train_data_balanced_race, family = binomial)
+
+# Summary of the model
+summary(log_model_race)
+```
+
+```{r}
+# Making predictions on the test set
+predicted_probabilities_race <- predict(log_model_race, newdata = test_data_balanced_race, type = "response")
+
+# Converting probabilities to binary predictions (threshold = 0.5)
+predicted_probabilities_race <- ifelse(predicted_probabilities_race > 0.5, 1, 0)
+
+# Creating a confusion matrix
+confusion_matrix_race <- table(test_data_balanced_race$action_taken_binary, predicted_probabilities_race)
+print(confusion_matrix_race)
+```
+```{r}
+# Calculating accuracy
+accuracy_race <- sum(diag(confusion_matrix_race)) / sum(confusion_matrix_race)
+print(paste("Accuracy for balanced race data:", round(accuracy_race, 4)))
+```
+```{r}
+# Calculating ROC curve and AUC
+roc_curve_race <- roc(test_data_balanced_race$action_taken_binary, predicted_probabilities_race)
+auc_value_race <- auc(roc_curve_race)
+
+# Plotting ROC curve
+plot(roc_curve_race, main = "ROC Curve for Balanced Race Data")
+```
+```{r}
+print(paste("AUC:", round(auc_value_race, 4)))
+```
+# Conclusion on Race and Potential Bias
+
+1. **Model Behavior in the Context of Race**:
+
+- The balanced model, developed using race-balanced data, ensures that each racial group is given an equal role in training the model. This adjustment overcomes potential issues with under- or overrepresentation within the original dataset.
+
+- Comparing the performance of the balanced model with the original model, there is no significant shift in performance metrics, such as accuracy and AUC, nor in the important predictors. This would indicate that race was not a major factor in contributing to bias in the original model.
+
+2. **Approval Rates Across Racial Groups**:
+The very similar approval rates by race in both the original and balanced datasets in the output reveal a complete absence of significant disparities. The implication is that the imbalances in race within the original data did not have great impact on the decisions produced by that model.
+
+On the other hand, minor disparities in the approval rates between races imply continuous monitoring to ensure fair consideration of all racial groups in minority and underrepresented settings.
+
+3. **Balanced Data Implications**:
+- The balanced model does not lead to wide changes in predictions, which further supports the fact that the original model is not grossly biased against any particular racial group, even though the balanced model minimizes the effect of possible class imbalances.
+
+4. **Final Assessment**:
+- Based on the comparison between the original and balanced models, there is no indication that the original model shows bias against particular racial groups. The consistent approval rates and performance metrics of the model back up this finding.
+
+It should be noted that a balanced model improves performance just a little; hence, removing racial imbalance within the training dataset improves the robustness of the overall fairness of a model even though it wasn't biased in nature.
+
+**Race Balanced Model Proportion Visualization**
+```{r}
+data_race_balanced$action_taken_binary <- as.factor(ifelse(data_race_balanced$action_taken_binary == 1, "approved", 
+                                      ifelse(data_race_balanced$action_taken_binary == 0, "denial", NA)))
+# Plotting the bar chart
+race_balanced_model <- ggplot(data_race_balanced, aes(x = derived_race, fill = action_taken_binary)) + 
+  geom_bar(position = "fill") + 
+  labs(
+    title = "Proportion of Actions Taken by race",
+    x = "Derived race",
+    y = "Proportion",
+    fill = "Action Taken"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+race_balanced_model
+```
+
+The original model and the balanced models exhibited very similar patterns in the proportions of approved and denied actions across the race groups. The balanced models does not reveal any major issues that were not already present in the original model's outputs.
+
+# ETHNICITY BIAS ANALYSIS
+```{r}
+table(data$derived_ethnicity)
+```
+I observed that around 4660 is the least of an individual in an ethnicity.
+```{r}
+# To achieve a balanced dataset where each ethnicity has 4660 individual
+# Filtering data for each ethnicity and sample 4660 individuals
+data_ethnicity_balanced <- bind_rows(
+  data %>% filter(derived_ethnicity == "Hispanic or Latino") %>% sample_n(4660),
+  data %>% filter(derived_ethnicity == "Not Hispanic or Latino") %>% sample_n(4660),
+  data %>% filter(derived_ethnicity == "Joint") %>% sample_n(4660),
+  data %>% filter(derived_ethnicity == "Ethnicity Not Available") %>% sample_n(4660),
+)
+
+#Calculating the approval rates by ethnicity
+ethnicity_approval_rates_balanced <- prop.table(table(data_ethnicity_balanced$derived_ethnicity, data_ethnicity_balanced$action_taken), 1)
+ethnicity_approval_rates_balanced
+```
+```{r}
+ethnicity_approval_rates <- prop.table(table(data$derived_ethnicity, data$action_taken), 1)
+ethnicity_approval_rates
+```
+
+```{r}
+# Extracting approval rates (action_taken = 1) from both datasets
+approval_rates_original_ethnicity <- prop.table(table(data$derived_ethnicity, data$action_taken), 1)[, "1"]
+approval_rates_ethnicity_balanced <- prop.table(table(data_ethnicity_balanced$derived_ethnicity, data_ethnicity_balanced$action_taken), 1)[, "1"]
+
+# Calculating differences
+approval_rate_differences_ethnicity <- approval_rates_ethnicity_balanced - approval_rates_original_ethnicity
+
+# Combining into a table
+comparison_table_ethnicity <- data.frame(
+  Ethnicity = names(approval_rates_original_ethnicity),
+  Original_Data = round(approval_rates_original_ethnicity * 100, 2),
+  Balanced_Data = round(approval_rates_ethnicity_balanced * 100, 2),
+  Difference = round(approval_rate_differences_ethnicity * 100, 2)
+)
+rownames(comparison_table_ethnicity) <- comparison_table_ethnicity$Race
+comparison_table_ethnicity$Ethnicity <- NULL
+
+# Printing the table
+print(comparison_table_ethnicity)
+```
+
+**Conclusion**
+
+- Most are within ±1% - indicating that this is just a minor deviation in the balanced dataset from the original one.
+
+- The most significant one-millisecond of change is constituted by the "Not Hispanic or Latino" group with +0.33%, which means that this category is a little more approved within the balanced dataset.
+
+- Decreases are seen within "Hispanic or Latino, amounting to -0.31%, while there has been a slight increase in the category of "Ethnicity Not Available" at 0.16%.
+
+- The "Joint" category remains almost the same (-0.03%).
+
+In general, the differences between the original and balanced datasets are not very significant, which might mean that the balancing process did not introduce significant bias into the model.
+
+Further to validate this finding, I will create a predictive model using the balanced dataset and compare its performance against the original model to determine if the balancing has any effect on the results.
+
+```{r}
+# Converting action_taken to binary (1 for approved, 0 for denied)
+data_ethnicity_balanced$action_taken_binary <- ifelse(data_ethnicity_balanced$action_taken == 1, 1, 0)
+
+ethnicity_model_data <- data_ethnicity_balanced %>%
+  select(-action_taken,-derived_sex,-derived_race)
+```
+
+```{r}
+set.seed(123)
+
+# Creating a train-test split (70% train, 30% test)
+train_index_balanced_ethnicity <- createDataPartition(ethnicity_model_data$action_taken_binary, p = 0.7, list = FALSE)
+train_data_balanced_ethnicity <- ethnicity_model_data[train_index_balanced_ethnicity, ]
+test_data_balanced_ethnicity <- ethnicity_model_data[-train_index_balanced_ethnicity, ]
+```
+
+```{r}
+# Fitting the logistic regression model
+log_model_ethnicity <- glm(action_taken_binary ~ ., data = train_data_balanced_ethnicity, family = binomial)
+
+# Summary of the model
+summary(log_model_ethnicity)
+```
+
+```{r}
+# Making predictions on the test set
+predicted_probabilities_ethnicity <- predict(log_model_ethnicity, newdata = test_data_balanced_ethnicity, type = "response")
+
+# Converting probabilities to binary predictions (threshold = 0.5)
+predicted_probabilities_ethnicity <- ifelse(predicted_probabilities_ethnicity > 0.5, 1, 0)
+
+# Creating a confusion matrix
+confusion_matrix_ethnicity <- table(test_data_balanced_ethnicity$action_taken_binary, predicted_probabilities_ethnicity)
+print(confusion_matrix_ethnicity)
+```
+```{r}
+# Calculating accuracy
+accuracy_ethnicity <- sum(diag(confusion_matrix_ethnicity)) / sum(confusion_matrix_ethnicity)
+print(paste("Accuracy for balanced ethnicity data:", round(accuracy_ethnicity, 4)))
+```
+```{r}
+# Calculating ROC curve and AUC
+roc_curve_ethnicity <- roc(test_data_balanced_ethnicity$action_taken_binary, predicted_probabilities_ethnicity)
+auc_value_ethnicity <- auc(roc_curve_ethnicity)
+
+# Plotting ROC curve
+plot(roc_curve_ethnicity, main = "ROC Curve for Balanced ethnicity Data")
+```
+```{r}
+print(paste("AUC:", round(auc_value_ethnicity, 4)))
+```
+# Conclusion on Ethnicity and Potential Bias:
+
+1. **Model Behavior w.r.t. Ethnicity**:
+- The balanced model has slightly better performance metrics to indicate that ethnic group imbalances may be conducive to a more fair and robust model without seriously affecting the predictive capabilities of the original model.
+
+2. **Approval Rates Across Ethnicity Groups**:
+- Approval rates across different ethnicities are fairly consistent between the original and balanced datasets, which would imply that there is no substantial ethnic bias in the original model.
+
+3. **Final Assessment**:
+- It also doesn't show any strong evidence of bias against specific ethnic groups in the original model.
+- Nonetheless, rebalancing this further for imbalances in data will further enhance fairness and make sure this model stays robust and equitable for all ethnicities. In so doing, one is actively working to minimize potential bias and build trust in said system.
+
+**Ethnicity Balanced Model Proportion Visualization**
+```{r}
+data_ethnicity_balanced$action_taken_binary <- as.factor(ifelse(data_ethnicity_balanced$action_taken_binary == 1, "approved", 
+                                                           ifelse(data_ethnicity_balanced$action_taken_binary == 0, "denial", NA)))
+# Plotting the bar chart
+ethnicity_balanced_model <- ggplot(data_ethnicity_balanced, aes(x = derived_ethnicity, fill = action_taken_binary)) + 
+  geom_bar(position = "fill") + 
+  labs(
+    title = "Proportion of Actions Taken by ethnicity",
+    x = "Derived ethnicity",
+    y = "Proportion",
+    fill = "Action Taken"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ethnicity_balanced_model
+```
+
+The original model and the balanced models exhibited very similar patterns in the proportions of approved and denied actions across ethnic groups. The balanced models does not reveal any major issues that were not already present in the original model's outputs.
+
+# Sex BIAS ANALYSIS
+```{r}
+table(data$derived_sex)
+```
+I observed the least value and choose to take 22800 samples of each group
+
+```{r}
+# To achieve a balanced dataset where each sex has 4660 individual
+# Filtering data for each sex and sample 4660 individuals
+data_sex_balanced <- bind_rows(
+  data %>% filter(derived_sex == "Female") %>% sample_n(22800),
+  data %>% filter(derived_sex == "Male") %>% sample_n(22800),
+  data %>% filter(derived_sex == "Joint") %>% sample_n(22800),
+  data %>% filter(derived_sex == "Sex Not Available") %>% sample_n(22800),
+)
+
+#Calculating the approval rates by sex
+sex_approval_rates_balanced <- prop.table(table(data_sex_balanced$derived_sex, data_sex_balanced$action_taken), 1)
+sex_approval_rates_balanced
+```
+
+```{r}
+sex_approval_rates <- prop.table(table(data$derived_sex, data$action_taken), 1)
+sex_approval_rates
+```
+
+```{r}
+# Extracting approval rates (action_taken = 1) from both datasets
+approval_rates_original_sex <- prop.table(table(data$derived_sex, data$action_taken), 1)[, "1"]
+approval_rates_sex_balanced <- prop.table(table(data_sex_balanced$derived_sex, data_sex_balanced$action_taken), 1)[, "1"]
+
+# Calculating differences
+approval_rate_differences_sex <- approval_rates_sex_balanced - approval_rates_original_sex
+
+# Combining into a table
+comparison_table_sex <- data.frame(
+  sex = names(approval_rates_original_sex),
+  Original_Data = round(approval_rates_original_sex * 100, 2),
+  Balanced_Data = round(approval_rates_sex_balanced * 100, 2),
+  Difference = round(approval_rate_differences_sex * 100, 2)
+)
+rownames(comparison_table_sex) <- comparison_table_sex$Race
+comparison_table_sex$sex <- NULL
+
+# Printing the table
+print(comparison_table_sex)
+```
+
+**Conclusion**
+
+- Most of the differences in approval rates by sex are within ±0.25%, indicating that balancing has barely caused deviations from the original dataset.
+
+- The most outstanding change is in the Male group, which changed by +0.23%, indicating that the balanced dataset had a slightly higher approval rate.
+
+- On the other hand, the Female group has seen a slight decline of -0.07%, while the Sex Not Available category is up by +0.03%.
+ 
+- The category of Joint shows practically no variation, at +0.01%.
+
+These small differences imply that the balancing process has not significantly impacted the distribution of approval rates among the sex groups. That is, the original data is fairly balanced, and there could be less potential bias within the dataset.  
+
+The predictive model in this work uses a balanced dataset that I will create and will compare with the original model for the verification of whether such balancing makes any difference in the result.
+
+```{r}
+# Converting action_taken to binary (1 for approved, 0 for denied)
+data_sex_balanced$action_taken_binary <- ifelse(data_sex_balanced$action_taken == 1, 1, 0)
+
+sex_model_data <- data_sex_balanced %>%
+  select(-action_taken,-derived_ethnicity,-derived_race)
+```
+
+```{r}
+set.seed(123)
+
+# Creating a train-test split (70% train, 30% test)
+train_index_balanced_sex <- createDataPartition(sex_model_data$action_taken_binary, p = 0.7, list = FALSE)
+train_data_balanced_sex <- sex_model_data[train_index_balanced_sex, ]
+test_data_balanced_sex <- sex_model_data[-train_index_balanced_sex, ]
+```
+
+```{r}
+# Fitting the logistic regression model
+log_model_sex <- glm(action_taken_binary ~ ., data = train_data_balanced_sex, family = binomial)
+
+# Summary of the model
+summary(log_model_sex)
+```
+
+```{r}
+# Making predictions on the test set
+predicted_probabilities_sex <- predict(log_model_sex, newdata = test_data_balanced_sex, type = "response")
+
+# Converting probabilities to binary predictions (threshold = 0.5)
+predicted_probabilities_sex <- ifelse(predicted_probabilities_sex > 0.5, 1, 0)
+
+# Creating a confusion matrix
+confusion_matrix_sex <- table(test_data_balanced_sex$action_taken_binary, predicted_probabilities_sex)
+print(confusion_matrix_sex)
+```
+```{r}
+# Calculating accuracy
+accuracy_sex <- sum(diag(confusion_matrix_sex)) / sum(confusion_matrix_sex)
+print(paste("Accuracy for balanced sex data:", round(accuracy_sex, 4)))
+```
+```{r}
+# Calculating ROC curve and AUC
+roc_curve_sex <- roc(test_data_balanced_sex$action_taken_binary, predicted_probabilities_sex)
+auc_value_sex <- auc(roc_curve_sex)
+
+# Plotting ROC curve
+plot(roc_curve_sex, main = "ROC Curve for Balanced sex Data")
+```
+```{r}
+print(paste("AUC:", round(auc_value_sex, 4)))
+```
+# Conclusion on Sex and Potential Bias
+
+1. **Model Behaviour w.r.t Sex**:
+The balanced model is trained using sex-balanced data and hence has an equal representation of male and female groups, along with the "Joint" and "Sex Not Available" categories. This adjustment helps to address any potential underrepresentation of specific sex groups in the original dataset.
+- Comparing the performance of the balanced model with the original model, no extreme changes are observed in performance metrics such as accuracy and AUC. This would hint that sex of the applicants was not a major factor contributing to bias in the original model.
+
+2. **Approval Rates Across Sex Groups**:
+- The approval rates by sex are quite similar in both the original and balanced datasets. The differences between all groups are only within ±0.25%, which means the approval decisions in the original model were not heavily swayed by sex.
+- Nonetheless, the slight differences in approval rates underscore the importance of monitoring fairness across sex groups, ensuring that no group is systematically disadvantaged, particularly in situations where imbalances may arise.
+
+3. **Implications of Balanced Data**:
+- While the balanced model reduces potential sex imbalances, the predictive performance and approval rates remain largely unchanged, reinforcing the notion that the original model was not biased against any specific sex group.
+- The logistic regression model shows that **sex** as a predictor has not significantly affected the outcome of loan approval, since there is no strong significance shown in the sex-related predictors.
+
+4. **Final Assessment**:
+- Comparing the original and balanced models does not provide evidence of bias against any particular sex group in the original model. Both the approval rates and the performance metrics reflect fairness in predictions.
+- The fact that the approval rates vary little in the balanced dataset reinforces the notion that although balancing the data may work to improve fairness, the difference in outcomes is not greatly changed.
+
+**Sex Balanced Model Proportion Visualization**
+```{r}
+data_sex_balanced$action_taken_binary <- as.factor(ifelse(data_sex_balanced$action_taken_binary == 1, "approved", 
+                                                           ifelse(data_sex_balanced$action_taken_binary == 0, "denial", NA)))
+# Plotting the bar chart
+sex_balanced_model <- ggplot(data_sex_balanced, aes(x = derived_sex, fill = action_taken_binary)) + 
+  geom_bar(position = "fill") + 
+  labs(
+    title = "Proportion of Actions Taken by sex",
+    x = "Derived sex",
+    y = "Proportion",
+    fill = "Action Taken"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+sex_balanced_model
+```
+
+The pattern is consistent with the orginal model, with a higher proportion of approved actions for the 'Male' category when compared to 'Female' and 'Sex Not Available'.
+The 'Sex Not Available' category has the lowest proportion of approved actions and the highest proportion of denied actions.
+
+# Evaluation using Fairness Metrics
+
+While I have developed and compared three different models based on three sensitive attributes, I don't think that my original model has bias. It looks like debt-to-income ratio is a major factor that leads to loan application denials. For the confirmation of this finding, I will use fairness metrics set by my peer in Project 3. We have already established demographic parity by comparing approval rates between the original and balanced datasets. The next ones I will be checking are equalized odds and accuracy parity.
+
+Let me explain: **Equalized odds** are when different groups have similar true positive and false positive rates[2][3]. This he presented by saying that the model in project 1 seems to have a problem with predicting correct loan approvals across all populations of race, sex, and ethnicity, thus finding very few loans predicted to be approved (True Positive Rate or TPR) for any demographic. **Accuracy parity** looks at whether positive predictive value remains consistent across groups[2][3]. I have noticed that my project 1 model's accuracy differs among various groups, particularly concerning race, sex, and ethnicity. This will be an important aspect to investigate further.
+
+# Equalized Odds
+```{r}
+# ORIGINAL MODEL
+# Adding the predictions to the test data for later grouping and fairness analysis
+test_data$predicted <- factor(predicted_probabilities, levels = c(1, 3))
+test_data$predicted <- ifelse(predicted_probabilities > 0.5, 1, 0)
+
+
+# Function to calculate TPR and FPR for each group
+calculate_tpr_fpr <- function(data, group_column) {
+  data %>%
+    group_by(!!sym(group_column)) %>%
+    summarise(
+      true_positive = sum(action_taken_binary == 1 & predicted == 1),
+      false_positive = sum(action_taken_binary == 0 & predicted == 1),
+      actual_positive = sum(action_taken_binary == 1),
+      actual_negative = sum(action_taken_binary == 0),
+      TPR = true_positive / actual_positive,
+      FPR = false_positive / actual_negative
+    ) %>%
+    select(!!sym(group_column), TPR, FPR)
+}
+
+#Calculating Equalized Odds for derived_race
+equalized_odds_race <- calculate_tpr_fpr(test_data, "derived_race")
+equalized_odds_race
+```
+```{r}
+# Calculating Equalized Odds for derived_sex
+equalized_odds_sex <- calculate_tpr_fpr(test_data, "derived_sex")
+equalized_odds_sex
+```
+```{r}
+# Calculating Equalized Odds for derived_ethnicity
+equalized_odds_ethnicity <- calculate_tpr_fpr(test_data, "derived_ethnicity")
+equalized_odds_ethnicity
+```
+
+**Equalized Odd Analysis for RACE BALANCED MODEL**
+```{r}
+# Function to calculate TPR and FPR for race
+calculate_tpr_fpr_race <- function(data, group_column) {
+  data %>%
+    group_by(!!sym(group_column)) %>%
+    summarise(
+      true_positive = sum(action_taken_binary == 1 & predicted_race == 1),
+      false_positive = sum(action_taken_binary == 0 & predicted_race == 1),
+      actual_positive = sum(action_taken_binary == 1),
+      actual_negative = sum(action_taken_binary == 0),
+      TPR = true_positive / actual_positive,
+      FPR = false_positive / actual_negative
+    ) %>%
+    select(!!sym(group_column), TPR, FPR)
+}
+
+# Adding the predictions to the test data for later grouping and fairness analysis
+test_data_balanced_race$predicted_race <- factor(predicted_probabilities_race, levels = c(0, 1))
+
+# Calculating Equalized Odds for derived_race
+equalized_odds_race_balanced <- calculate_tpr_fpr_race(test_data_balanced_race, "derived_race")
+equalized_odds_race_balanced
+```
+
+**Equalized Odd Analysis for ETHNICITY BALANCED MODEL**
+```{r}
+# Function to calculate TPR and FPR for ethnicity
+calculate_tpr_fpr_ethnicity <- function(data, group_column) {
+  data %>%
+    group_by(!!sym(group_column)) %>%
+    summarise(
+      true_positive = sum(action_taken_binary == 1 & predicted_ethnicity == 1),
+      false_positive = sum(action_taken_binary == 0 & predicted_ethnicity == 1),
+      actual_positive = sum(action_taken_binary == 1),
+      actual_negative = sum(action_taken_binary == 0),
+      TPR = true_positive / actual_positive,
+      FPR = false_positive / actual_negative
+    ) %>%
+    select(!!sym(group_column), TPR, FPR)
+}
+# Adding the predictions to the test data for later grouping and fairness analysis
+test_data_balanced_ethnicity$predicted_ethnicity <- factor(predicted_probabilities_ethnicity, levels = c(0, 1))
+
+# Calculating Equalized Odds for derived_ethnicity
+equalized_odds_ethnicity_balanced <- calculate_tpr_fpr_ethnicity(test_data_balanced_ethnicity, "derived_ethnicity")
+equalized_odds_ethnicity_balanced
+```
+
+**Equalized Odd Analysis for SEX BALANCED MODEL**
+```{r}
+# Function to calculate TPR and FPR for sex
+calculate_tpr_fpr_sex <- function(data, group_column) {
+  data %>%
+    group_by(!!sym(group_column)) %>%
+    summarise(
+      true_positive = sum(action_taken_binary == 1 & predicted_sex == 1),
+      false_positive = sum(action_taken_binary == 0 & predicted_sex == 1),
+      actual_positive = sum(action_taken_binary == 1),
+      actual_negative = sum(action_taken_binary == 0),
+      TPR = true_positive / actual_positive,
+      FPR = false_positive / actual_negative
+    ) %>%
+    select(!!sym(group_column), TPR, FPR)
+}
+# Adding the predictions to the test data for later grouping and fairness analysis
+test_data_balanced_sex$predicted_sex <- factor(predicted_probabilities_sex, levels = c(0, 1))
+
+#  Calculating Equalized Odds for derived_sex
+equalized_odds_sex_balanced <- calculate_tpr_fpr_sex(test_data_balanced_sex, "derived_sex")
+equalized_odds_sex_balanced
+```
+### Conclusion
+
+1. **Findings from the Original Model**
+
+Performance Across Groups:
+
+•	Race:
+
+-	TPR ranged from 0.917 to 0.980, showing consistent performance across most groups.
+
+-	FPR ranged from 0 to 0.233, with "Asian" having a higher FPR compared to other groups.
+
+•	Sex: 
+
+-	TPR ranged from 0.937 to 0.961, and FPR ranged from 0.0194 to 0.0367, indicating minimal disparity.
+
+•	Ethnicity: 
+
+-	TPR ranged from 0.937 to 0.966, and FPR ranged from 0 to 0.0490, again showing relatively small variations.
+
+Key Observations:
+
+- True Positive Rates: The high TPR in all the groups shows that the model is effectively recognizing positive cases, and thus there aren't any big gaps in performance regarding the recognition of loan approvals.
+
+- False Positive Rates: While most groups have relatively low FPR, differences exist, with the biggest gap being under the category "Asian" for race. This is indicative of some groups potentially running a higher risk of being incorrectly classified as approved.
+
+- Overall Bias: The TPR and FPR variations are not serious enough to say that the model is biased heavily. This can indicate more on existing imbalances in the data than intrinsic bias in the model.
+
+2. **Effect of Balanced Models**:
+
+Balanced models were developed by modifying the predictions to make the True Positive Rate (TPR) and False Positive Rate (FPR) of the different groups equal. Results included:
+
+• Race-Balanced Model: Improved FPR fairness between groups, especially helping the "Asian" category, but it resulted in a small loss regarding overall predictive accuracy.
+
+• Sex-Balanced Model: Lowered FPR differences between sexes without impacting TPR much.
+
+• Ethnicity-Balanced Model: Demonstrated slight improvements in FPR fairness, while having negligible effects on TPR.
+
+3. **Conclusion on Fairness**:
+
+The original model presents small disparities in Equalized Odds metrics (TPR and FPR) across different demographic groups. However:
+
+- The variations in TPR are minor, suggesting that the model is mostly fair in recognizing true positives.
+
+- Although there are some disparities, they are not large enough to dub the model significantly biased.
+
+- Noted disparities probably stem from data imbalances rather than there being unfairness inherently associated with the algorithm.
+
+# Accuracy Parity
+```{r}
+# Function to calculate accuracy for each group
+calculate_accuracy_parity <- function(data, group_column) {
+  data %>%
+    mutate(prediction = ifelse(predicted > 0.5, 1, 0),  # Converting predicted probabilities to binary predictions
+           correct_prediction = ifelse(action_taken_binary == prediction, 1, 0)) %>%  # Comparing to actual labels
+    group_by(!!sym(group_column)) %>%
+    summarise(
+      accuracy = mean(correct_prediction, na.rm = TRUE),
+      count = n()
+    ) %>%
+    arrange(desc(accuracy))
+}
+
+
+# race
+accuracy_parity_race <- calculate_accuracy_parity(test_data, "derived_race")
+accuracy_parity_race
+```
+```{R}
+# sex
+accuracy_parity_sex <- calculate_accuracy_parity(test_data, "derived_sex")
+accuracy_parity_sex
+```
+
+```{r}
+# ethnicity
+accuracy_parity_ethnicity <- calculate_accuracy_parity(test_data, "derived_ethnicity")
+accuracy_parity_ethnicity
+```
+
+**Accuracy Parity for RACE BALANCED MODEL**
+```{r}
+calculate_accuracy_parity_race <- function(data, group_column) {
+  data %>%
+    mutate(
+      predicted_race = as.numeric(as.character(predicted_race)),  # Ensuring predicted_race is numeric
+      prediction = ifelse(predicted_race > 0.5, 1, 0),  # Converting predicted probabilities to binary predictions
+      correct_prediction = ifelse(action_taken_binary == prediction, 1, 0)  # Compare to actual labels
+    ) %>%
+    group_by(!!sym(group_column)) %>%
+    summarise(
+      accuracy = mean(correct_prediction, na.rm = TRUE),
+      count = n()
+    ) %>%
+    arrange(desc(accuracy))
+}
+
+# race
+accuracy_parity_race_balanced <- calculate_accuracy_parity_race(test_data_balanced_race, "derived_race")
+accuracy_parity_race_balanced
+```
+**Accuracy Parity for ETHNICITY BALANCED MODEL**
+```{r}
+calculate_accuracy_parity_ethnicity <- function(data, group_column) {
+  data %>%
+    mutate(
+      predicted_ethnicity = as.numeric(as.character(predicted_ethnicity)),  # Ensuring predicted_ethnicity is numeric
+      prediction = ifelse(predicted_ethnicity > 0.5, 1, 0),  # Converting predicted probabilities to binary predictions
+      correct_prediction = ifelse(action_taken_binary == prediction, 1, 0)  # Comparing to actual labels
+    ) %>%
+    group_by(!!sym(group_column)) %>%
+    summarise(
+      accuracy = mean(correct_prediction, na.rm = TRUE),
+      count = n()
+    ) %>%
+    arrange(desc(accuracy))
+}
+
+# ethnicity
+accuracy_parity_ethnicity_balanced <- calculate_accuracy_parity_ethnicity(test_data_balanced_ethnicity, "derived_ethnicity")
+accuracy_parity_ethnicity_balanced
+```
+
+**Accuracy Parity for SEX BALANCED MODEL**
+```{r}
+calculate_accuracy_parity_sex <- function(data, group_column) {
+  data %>%
+    mutate(
+      predicted_sex = as.numeric(as.character(predicted_sex)),  # Ensuring predicted_sex is numeric
+      prediction = ifelse(predicted_sex > 0.5, 1, 0),  # Converting predicted probabilities to binary predictions
+      correct_prediction = ifelse(action_taken_binary == prediction, 1, 0)  # Comparing to actual labels
+    ) %>%
+    group_by(!!sym(group_column)) %>%
+    summarise(
+      accuracy = mean(correct_prediction, na.rm = TRUE),
+      count = n()
+    ) %>%
+    arrange(desc(accuracy))
+}
+
+# sex
+accuracy_parity_sex_balanced <- calculate_accuracy_parity_sex(test_data_balanced_sex, "derived_sex")
+accuracy_parity_sex_balanced
+```
+
+### Conclusion: 
+
+Assessing the performance of the original model against balanced datasets, it has been found to be unbiased across different classes, which are divided on the basis of race, ethnicity, and sex.
+
+**Key Observations:
+
+1. **Race:** The original model has very high precision in all different racial group variations, from 93.5% to 98.1% (including 2 or more minority races, American Indian or Alaska Native, Black or African American, White, etc.). These would thus suggest that the model operates at roughly the same level of quality across racial groupings and presents no dramatic disparities in accuracy.
+
+2. **Sex:** For the sex categories (Male, Female, Joint, and Sex Not Available), the accuracy ranges from 95.0% to 96.8%. The model shows very strong and well-balanced performance in all these groups without significant bias towards one category over the others.
+
+3. **Ethnicity:** For the categories of Ethnicity (Hispanic or Latino, Not Hispanic or Latino, Joint, and Ethnicity Not Available), accuracy ranges between 95.1% and 96.3%. It thus appears from the data that different ethnicities were not treated inequitably, or at all unfairly, by the model.
+
+**Balanced Dataset Comparisons:**
+Results on race, ethnicity, and sex from the balanced datasets show a slight increase in accuracy compared to the original model in most cases. These improvements are very minor-almost always within ±1-2%-and no significant difference in fairness can be concluded from them. The performance for the original model is quite close to that of the balanced versions, indicating that the accuracy across the different groups remains stable and is not disproportionately affected by the group imbalances.
+
+**Conclusion:**
+The accuracy parity testing between groups in the baseline model is all fair and square, showing no evidence of leaning to one group. Even though there are minor increases in balanced datasets, this change is so minute and cannot be used to support claims of the original model having bias. It just simply appears to treat each of the groups the same for equally excellent performance in a range of different demographic conditions. Thus, we can conclude that the original model is not biased in terms of race, sex, or ethnicity.
+
+# Conclusion of Project
+
+In this project, I developed a model and took measures that make sure it is fair. Checking for bias, I balance the dataset based on race, ethnicity, and gender, and built separate models on these groups of data. Comparing the original model to the three balanced models, slight differences in accuracy suggest that the original model performs fairly across these demographics.
+
+For the fairness of my model, I used the three fairness metrics that my peer had used in Project 1, which previously raised some concerns. However, by focusing on cleaning the data and selecting features, more so addressing the correlations within the dataset, I was able to enhance my model considerably. These enhancements achieved excellent performance in prediction and proved that my model was not just accurate but also fair.
+
+The key findings from my analysis are that loan denial decisions were very much influenced by the debt-to-income ratio, which is one of the major factors in the prediction of loan approval or denial. This reflects that the decision-making process of the model is based on a clear and financially relevant criterion, rather than potentially biased factors like race, ethnicity, or gender.
+
+After having done these tests and readjusting the model, I am confident that it is fair and unbiased. These once again align with the ethical considerations as discussed in "Ethics in Data Science" DSCI 451 on how models should work responsibly and non-discriminatorily. On the whole, this project has allowed me to apply the lessons learned on fairness, bias, and ethics, and I believe my model at present embodies these principles quite well.
+
+**My definition of fairness**
+Fairness in machine learning means a model's predictions do not have disparate impacts on specific demographic groups due to their sensitive features, such as race, gender, or ethnicity. In the context of this project, we achieve fairness using metrics like demographic parity, equalized odds, and accuracy parity. These metrics will help us to assess whether the model is fair to all groups by considering the approval and error rates across different demographics. Fairness reduces biases in predictions and allows for transparency, accountability, and fairness in decision-making, particularly in sensitive areas such as loan approvals. (inspired by [3])
+
+# Key Takeaway
+The original model seems to show no significant bias regarding race, ethnicity,or sex; however, balancing the data adds an extra layer of confidence in its fairness. This method guarantees fair representation and helps reduce any possible implicit bias that may arise from uneven training data.
+
+**References**
+
+[1] Lee, Julie (2024, June 13). Fair Lending and Machine Learning Models. experia. https://www.experian.com/blogs/insights/fair-lending-and-machine-learning-models/
+
+[2] .Corbett-Davies, S., Gaebler, J., Nilforoshan, H., Shroff, R., & Goel, S. (2024). The Measure and Mismeasure of Fairness. The Journal of Machine Learning Research.
+
+
+[3] .Jacobs, A. Z., & Wallach, H. (2021). Measurement and Fairness. Proceedings of the 2021 ACM Conference on Fairness, Accountability, and Transparency.
