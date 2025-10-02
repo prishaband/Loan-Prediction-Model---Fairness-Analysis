@@ -16,7 +16,7 @@ This project develops a **predictive model for loan approvals** using home loan 
 
 ## 📂 Dataset
 
-* **Source:** Home loan application data (Georgia).
+* **Source:** Home loan application data (Georgia). https://ffiec.cfpb.gov/documentation/publications/loan-level-datasets/lar-data-fields/
 * **Key Features:**
 
   * Applicant attributes (income, ethnicity, sex, race).
